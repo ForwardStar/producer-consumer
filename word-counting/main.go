@@ -1,94 +1,103 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"io/ioutil"
-	"strings"
+	"log"
+	"os"
+	"sync"
 	"time"
 )
 
-func producer() chan string {
-	f, err := ioutil.ReadFile("words.txt")
+type wordCountPair struct {
+	Word  string
+	Count int
+}
+
+func producer() (<-chan string, error) {
+	file, err := os.Open("words.txt")
 	if err != nil {
-		fmt.Println("Read failed:", err)
+		return nil, err
 	}
-	words := strings.Split(string(f), " ")
 
-	c := make(chan string, 10)
-	go func(c chan string) {
-		for i := range words {
-			c <- words[i]
-			fmt.Println("Write:", words[i])
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanWords)
+
+	c := make(chan string)
+	go func() {
+		defer close(c)
+		for scanner.Scan() {
+			c <- scanner.Text()
+			fmt.Println("Write:", scanner.Text())
 		}
-		close(c)
-	}(c)
-	return c
+	}()
+	return c, nil
 }
 
-func consumer(stringCh chan string) chan map[string]int {
-	c := make(chan map[string]int)
-	go func(c chan map[string]int) {
-		word_counting := make(map[string]int)
-		value, ok := <-stringCh
-		for ok {
+func consumer(stringCh <-chan string) <-chan wordCountPair {
+	c := make(chan wordCountPair)
+	go func() {
+		defer close(c)
+		wordCounting := make(map[string]int)
+		for word := range stringCh {
 			time.Sleep(2 * time.Second)
-			count, exists := word_counting[value]
+			count, exists := wordCounting[word]
 			if exists {
-				word_counting[value] = count + 1
+				wordCounting[word] = count + 1
 			} else {
-				word_counting[value] = 1
+				wordCounting[word] = 1
 			}
-			fmt.Println("Count:", value)
-			value, ok = <-stringCh
 		}
-		c <- word_counting
-		close(c)
-	}(c)
+		for k, v := range wordCounting {
+			c <- wordCountPair{k, v}
+		}
+	}()
 	return c
 }
 
-func mergeChannels(chs ...chan map[string]int) chan map[string]int {
-	c := make(chan map[string]int)
-	go func(c chan map[string]int) {
-		word_counting := make(map[string]int)
-		for {
-			flag := false
-			for i := 0; i < len(chs); i++ {
-				value, ok := <-chs[i]
-				if ok {
-					for k, v := range value {
-						count, exists := word_counting[k]
-						if exists {
-							word_counting[k] = count + v
-						} else {
-							word_counting[k] = v
-						}
-					}
-					flag = true
+func mergeChannels(chs ...<-chan wordCountPair) <-chan wordCountPair {
+	c := make(chan wordCountPair)
+	go func() {
+		defer close(c)
+		var waitGroup sync.WaitGroup
+		for i := 0; i < len(chs); i++ {
+			waitGroup.Add(1)
+			go func(pairCh <-chan wordCountPair) {
+				defer waitGroup.Done()
+				for pair := range pairCh {
+					c <- pair
 				}
-			}
-			if !flag {
-				break
-			}
+			}(chs[i])
 		}
-		c <- word_counting
-		close(c)
-	}(c)
+		waitGroup.Wait()
+	}()
 	return c
 }
 
 func main() {
 	fmt.Println(time.Now())
-	c := producer()
+	c, err := producer()
+	if err != nil {
+		log.Printf("producer failed: %v", err)
+	}
 	d := mergeChannels(
 		consumer(c),
 		consumer(c),
 		consumer(c),
 		consumer(c),
 	)
-	word_counting := <-d
-	for k, v := range word_counting {
-		fmt.Println(k+":", v)
+	wordCounting := make(map[string]int)
+	for pair := range d {
+		count, exists := wordCounting[pair.Word]
+		if exists {
+			wordCounting[pair.Word] = count + 1
+		} else {
+			wordCounting[pair.Word] = 1
+		}
+	}
+	for k, v := range wordCounting {
+		fmt.Print("{ "+k+": ", v)
+		fmt.Println(" }")
 	}
 	fmt.Println(time.Now())
 }
